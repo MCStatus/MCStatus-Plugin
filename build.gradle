@@ -49,3 +49,8 @@ processResources {
         expand props
     }
 }
+
+jar {
+    archiveBaseName.set("LiveUpdate")
+    archiveFileName.set("${archiveBaseName.get()}.jar")
+}
