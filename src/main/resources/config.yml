@@ -1,0 +1,39 @@
+
+# ============
+# For help, please join our Discord: https://discord.gg/5JX2Q3dHDt
+# To contribute, see our GitHub: https://github.com/MCStatus/MCStatus-Plugin
+# ============
+
+# Set the FULL Discord webhook URL here
+# Example: https://discord.com/api/webhooks/1234567890987654321/abcdefgwhateverelsehereitsasuperlongtoken
+# See this page on creating a Discord webhook: https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks
+# In the create webhook menu, you can also set the icon and name of your webhook!
+webhook-url: SET_YOUR_WEBHOOK_URL_HERE
+
+# You can put your server IP address here, it will appear on the embed footer.
+footer-text: play.example.com
+
+# Set this to your server-icon.png.  You can set this to any image file on pretty much
+# any hosting provider, as long as it can be accessed by Discord.  NOTE: if you are
+# using a Discord CDN url, make sure it does not have the "?" or anything after it.
+# Example URL for Discord: https://media.discordapp.net/attachments/1200673802581979236/1284998841913049158/image.png
+# It won't appear to work in a browser; however, it will work inside the Discord app.
+server-icon-url: https://cdn.mcstatus.me/default.png
+
+# Set the plugin to update once every 10 seconds instead of every 15 seconds.  While
+# you *probably* won't have Discord rate limit you, 15 seconds is plenty of time,
+# especially if your server does not update frequently.
+use-faster-updates: false
+
+# In case you don't want to display the player list, you can set this to false.
+display-player-list: true
+
+# If you want to set a custom version (such as "Java 1.18 - 1.21"), you
+# can do that with this line.  This will override the version from Bukkit.
+set-custom-version: null
+
+# DO NOT MODIFY THIS unless you 100% know what you are doing!
+# Staff from the MCStatus Discord might tell you to change this to
+# debug potential issues, otherwise you should not change this.
+# This will be set automatically by the plugin.
+mcstatus-wh-message-id: null
