@@ -47,6 +47,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./build/libs/liveupdate.jar
+          asset_path: ./build/libs/LiveUpdate.jar
           asset_name: liveupdate-${{ env.VERSION }}.jar
           asset_content_type: application/java-archive
