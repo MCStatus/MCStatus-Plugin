@@ -50,3 +50,4 @@ jobs:
           asset_path: ./build/libs/LiveUpdate.jar
           asset_name: liveupdate-${{ env.VERSION }}.jar
           asset_content_type: application/java-archive
+          
