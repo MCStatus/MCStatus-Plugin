@@ -9,17 +9,24 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.plugin.IllegalPluginAccessException;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
 public final class Liveupdate extends JavaPlugin implements Listener {
 
+    private static final String UNSET_WEBHOOK_URL = "SET_YOUR_WEBHOOK_URL_HERE";
+    
     private String webhookUrl;
     private String footerText;
     private String messageID = null;
@@ -41,60 +48,75 @@ public final class Liveupdate extends JavaPlugin implements Listener {
     private boolean displayPlayerList = true;
     
     private BukkitTask task = null;
+    
+    private DiscordWebhook webhook;
+    
+    private ExecutorService webhookExecutor;
+    
+    private final AtomicBoolean updateInFlight = new AtomicBoolean(false);
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        
+        webhook = new DiscordWebhook();
+        webhookExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "MCStatus-Webhook");
+            t.setDaemon(true);
+            return t;
+        });
 
-        try {
-            loadConfig();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        loadConfig();
 
         this.getLogger().log(Level.INFO, "Starting the MCStatus.me Live Update Plugin");
 
         getServer().getPluginManager().registerEvents(this, this);
         
-        if(webhookUrl.equals("SET_YOUR_WEBHOOK_URL_HERE")) {
+        if(UNSET_WEBHOOK_URL.equals(webhookUrl)) {
             this.getLogger().log(Level.WARNING, "Set your Discord webhook URL in config.yml.");
-            return;
         }
-        
     }
 
     @Override
     public void onDisable() {
         this.getLogger().log(Level.INFO, "Closing the MCStatus.me Live Update Plugin");
-
-        String motd = Bukkit.getServer().getMotd();
-        String strippedMotd = ChatColor.stripColor(motd);
         
-        int maxPlayers = Bukkit.getServer().getMaxPlayers();
+        cancelUpdateTask();
         
-        String version = Bukkit.getServer().getVersion();
-
-        if(!customVersion.equals("null")) {
-            version = customVersion;
-        }
-        
-        try {
-            if(messageID != null) {
-                DiscordWebhook.sendServerStatusToDiscord(messageID, iconURL, strippedMotd, footerText, false, 0, maxPlayers, version, webhookUrl);
+        if(webhookExecutor != null) {
+            webhookExecutor.shutdown();
+            try {
+                if(!webhookExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    getLogger().warning("Timed out waiting for the last Discord update to finish");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-        } catch (IOException e) {
-            throw new RuntimeException(e);
         }
         
-        if(this.task != null) {
-            this.task.cancel();
-            this.task = null;
+        if(webhook != null && messageID != null && !UNSET_WEBHOOK_URL.equals(webhookUrl)) {
+            String strippedMotd = ChatColor.stripColor(Bukkit.getServer().getMotd());
+            int maxPlayers = Bukkit.getServer().getMaxPlayers();
+            
+            try {
+                webhook.sendServerStatusToDiscord(messageID, iconURL, strippedMotd, footerText, false, 0, maxPlayers, resolveVersion(), webhookUrl);
+            } catch (IOException e) {
+                getLogger().warning("Could not send the offline status to Discord: " + e.getMessage());
+            }
+        }
+        
+        if(webhook != null) {
+            try {
+                webhook.close();
+            } catch (IOException e) {
+                getLogger().log(Level.WARNING, "Error closing the Discord HTTP client", e);
+            }
         }
     }
 
-    private void loadConfig() throws IOException {
+    private void loadConfig() {
         FileConfiguration config = getConfig();
-        webhookUrl = config.getString("webhook-url", "SET_YOUR_WEBHOOK_URL_HERE");
+        webhookUrl = config.getString("webhook-url", UNSET_WEBHOOK_URL);
         footerText = config.getString("footer-text", "Set your footer in config.yml");
         fasterUpdates = config.getBoolean("use-faster-updates", false);
         iconURL = config.getString("server-icon-url");
@@ -106,84 +128,151 @@ public final class Liveupdate extends JavaPlugin implements Listener {
             messageID = null;
         }
         
-        if("SET_YOUR_WEBHOOK_URL_HERE".equals(webhookUrl)) {
+        if(UNSET_WEBHOOK_URL.equals(webhookUrl)) {
             this.getLogger().log(Level.WARNING, "Webhook URL not set in config.yml");
             return;
         }
         
+        cancelUpdateTask();
+        
+        if(this.messageID == null) {
+            createWebhookMessage(webhookUrl);
+        } else {
+            startUpdateTask();
+        }
+    }
+    
+    private void createWebhookMessage(String url) {
+        webhookExecutor.execute(() -> {
+            String id;
+            try {
+                id = webhook.initWebhook(url);
+            } catch (IOException e) {
+                getLogger().warning("Could not create the Discord status message: " + e.getMessage());
+                return;
+            }
+            
+            runOnMainThread(() -> {
+                if(!url.equals(webhookUrl) || messageID != null) {
+                    return;
+                }
+                
+                messageID = id;
+                getConfig().set("mcstatus-wh-message-id", id);
+                getConfig().setComments("mcstatus-wh-message-id", WH_COMMENTS);
+                saveConfig();
+                
+                getLogger().info("Successfully saved the webhook message ID");
+                
+                startUpdateTask();
+            });
+        });
+    }
+    
+    private void startUpdateTask() {
+        cancelUpdateTask();
+        
+        //10-15 seconds good enough?  I don't want to abuse Discord's API too much
+        long period = fasterUpdates ? 200L : 300L;
+        this.task = Bukkit.getScheduler().runTaskTimer(this, this::publishStatus, 0L, period);
+    }
+    
+    private void cancelUpdateTask() {
         if(this.task != null) {
             this.task.cancel();
             this.task = null;
         }
-        
-        if(this.messageID == null) {
-            this.messageID = DiscordWebhook.initWebhook(webhookUrl);
-            
-            config.set("mcstatus-wh-message-id", messageID);
-            config.setComments("mcstatus-wh-message-id", WH_COMMENTS);
-            saveConfig();
-            
-            getLogger().info("Successfully saved the webhook message ID");
+    }
+    
+    private void publishStatus() {
+        if(messageID == null) {
+            return;
         }
         
-        this.task = new BukkitRunnable() {
-            @Override
-            public void run() {
-                
-                String motd = Bukkit.getServer().getMotd();
-                
-                String strippedMotd = ChatColor.stripColor(motd);
-                
-                StringBuilder playerList = new StringBuilder();
-                
-                if(displayPlayerList) {
-                    
-                    if(!getServer().getOnlinePlayers().isEmpty()) {
-                        playerList.append("**Players**:\n");
-                    }
-                    
-                    for(Player onlinePlayer : getServer().getOnlinePlayers()) {
-                        String username = onlinePlayer.getName();
-                        //+2 for the comma and space
-                        if((playerList.length() + username.length() + 2) > 3800) {
-                            break;
-                        }
-
-                        playerList.append(username).append(", ");
-                    }
-
-                    if(playerList.toString().endsWith(", ")) {
-                        playerList = new StringBuilder(playerList.substring(0, playerList.length() - 2));
-                    }
-                }
-                
-                int onlinePlayers = Bukkit.getServer().getOnlinePlayers().size();
-                int maxPlayers    = Bukkit.getServer().getMaxPlayers();
-                
-                String version = Bukkit.getServer().getVersion();
-                
-                if(!customVersion.equals("null")) {
-                    version = customVersion;
-                }
-                
-                try {
-                    if(messageID != null) {
-                        DiscordWebhook.sendServerStatusToDiscord(messageID, iconURL, strippedMotd + "\n\n" + playerList, footerText, true, onlinePlayers, maxPlayers, version, webhookUrl);
-                    }
-                } catch(FileNotFoundException ignored) {
-                    config.set("mcstatus-wh-message-id", "null");
-                    config.setComments("mcstatus-wh-message-id", WH_COMMENTS);
-                    
-                    try {
-                        loadConfig();
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
+        if(!updateInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        
+        String description = ChatColor.stripColor(Bukkit.getServer().getMotd()) + "\n\n" + buildPlayerList();
+        int onlinePlayers = Bukkit.getServer().getOnlinePlayers().size();
+        int maxPlayers = Bukkit.getServer().getMaxPlayers();
+        String version = resolveVersion();
+        
+        String id = messageID;
+        String url = webhookUrl;
+        String icon = iconURL;
+        String footer = footerText;
+        
+        webhookExecutor.execute(() -> {
+            try {
+                webhook.sendServerStatusToDiscord(id, icon, description, footer, true, onlinePlayers, maxPlayers, version, url);
+            } catch (FileNotFoundException e) {
+                getLogger().warning("The Discord status message no longer exists, creating a new one");
+                runOnMainThread(() -> recreateWebhookMessage(id));
+            } catch (IOException e) {
+                getLogger().warning("Could not update the Discord status: " + e.getMessage());
+            } finally {
+                updateInFlight.set(false);
             }
-        }.runTaskTimer(this, 0L, fasterUpdates ? 200L : 300L); //10-15 seconds good enough?  I don't want to abuse Discord's API too much
+        });
+    }
+    
+    private void recreateWebhookMessage(String staleId) {
+        if(!staleId.equals(messageID)) {
+            return;
+        }
+        
+        cancelUpdateTask();
+        messageID = null;
+        getConfig().set("mcstatus-wh-message-id", "null");
+        getConfig().setComments("mcstatus-wh-message-id", WH_COMMENTS);
+        
+        createWebhookMessage(webhookUrl);
+    }
+    
+    private String buildPlayerList() {
+        if(!displayPlayerList) {
+            return "";
+        }
+        
+        Collection<? extends Player> players = getServer().getOnlinePlayers();
+        if(players.isEmpty()) {
+            return "";
+        }
+        
+        StringBuilder playerList = new StringBuilder("**Players**:\n");
+        boolean appended = false;
+        
+        for(Player onlinePlayer : players) {
+            String username = onlinePlayer.getName();
+            
+            if((playerList.length() + username.length() + 2) > 3800) {
+                break;
+            }
+            
+            playerList.append(username).append(", ");
+            appended = true;
+        }
+        
+        if(appended) {
+            playerList.setLength(playerList.length() - 2);
+        }
+        
+        return playerList.toString();
+    }
+    
+    private String resolveVersion() {
+        return "null".equals(customVersion) ? Bukkit.getServer().getVersion() : customVersion;
+    }
+    
+    private void runOnMainThread(Runnable action) {
+        if(!isEnabled()) {
+            return;
+        }
+        
+        try {
+            Bukkit.getScheduler().runTask(this, action);
+        } catch (IllegalPluginAccessException ignored) {}
     }
     
     @EventHandler
@@ -191,7 +280,7 @@ public final class Liveupdate extends JavaPlugin implements Listener {
         Player player = event.getPlayer();
         
         if(player.isOp()) {
-            if("SET_YOUR_WEBHOOK_URL_HERE".equals(webhookUrl)) {
+            if(UNSET_WEBHOOK_URL.equals(webhookUrl)) {
                 player.sendMessage(ChatColor.RED + "[MCStatus.me Live Update]: Please set the URL for your webhook in config.yml, then run /mcstatus reload (only operators can see this message)");
             }
         }
@@ -210,11 +299,7 @@ public final class Liveupdate extends JavaPlugin implements Listener {
                     this.reloadConfig();
                     sender.sendMessage(ChatColor.GREEN + "MCStatus.me configuration reloaded.");
                     this.getLogger().log(Level.INFO, "Configuration reloaded by " + sender.getName());
-                    try {
-                        this.loadConfig();
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
+                    this.loadConfig();
                 } else {
                     sender.sendMessage(ChatColor.RED + "You don't have permission to use this command.");
                 }

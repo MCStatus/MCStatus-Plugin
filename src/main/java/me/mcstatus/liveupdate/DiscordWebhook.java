@@ -1,22 +1,61 @@
 package me.mcstatus.liveupdate;
 
-import com.google.gson.*;
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
-import java.io.*;
+import java.io.Closeable;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.time.Instant;
 
-import org.apache.http.client.methods.*;
+import org.apache.http.HttpEntity;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpEntityEnclosingRequestBase;
+import org.apache.http.client.methods.HttpPatch;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 
-public class DiscordWebhook {
+/**
+ * Thin client for the Discord webhook API.
+ *
+ * One instance owns a single pooled HTTP client with bounded timeouts, so
+ * connections are reused between updates and a stalled network can never hang
+ * the caller indefinitely.  Create it once on enable and {@link #close()} it on
+ * disable.  Instances are safe to use from any thread.
+ */
+public class DiscordWebhook implements Closeable {
     
     private static final int RED = 16711680;
     private static final int GREEN = 7052103;
+    
+    private static final int CONNECT_TIMEOUT_MS = 5_000;
+    private static final int READ_TIMEOUT_MS = 10_000;
+    
+    private static final Gson GSON = new Gson();
+    
+    private final CloseableHttpClient client;
+    
+    public DiscordWebhook() {
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                .setConnectionRequestTimeout(CONNECT_TIMEOUT_MS)
+                .setSocketTimeout(READ_TIMEOUT_MS)
+                .build();
+        
+        this.client = HttpClients.custom()
+                .setDefaultRequestConfig(requestConfig)
+                .setUserAgent("MCStatus-LiveUpdate")
+                .build();
+    }
 
-    public static void sendServerStatusToDiscord(String message_id, String thumbnail_url, String embed_description, String footer_text, boolean online, int onlinePlayers, int maxPlayers, String version, String webhookUrl) throws IOException {
+    public void sendServerStatusToDiscord(String message_id, String thumbnail_url, String embed_description, String footer_text, boolean online, int onlinePlayers, int maxPlayers, String version, String webhookUrl) throws IOException {
         
         if(webhookUrl.equals("SET_YOUR_WEBHOOK_URL_HERE")) {
             return;
@@ -66,51 +105,50 @@ public class DiscordWebhook {
         
         rootObject.addProperty("content", ""); //intentionally empty
         
-        Gson gson = new GsonBuilder().setPrettyPrinting().create();
-        String jsonPayload = gson.toJson(rootObject);
-        
-        sendWebhook(webhookUrl + "/messages/" + message_id, jsonPayload, "PATCH");
+        // ?wait=true needs to be added otherwise no content is returned from Discord
+        send(new HttpPatch(webhookUrl + "/messages/" + message_id + "?wait=true"), GSON.toJson(rootObject));
     }
     
-    public static String initWebhook(String webhookURL) throws IOException {
+    public String initWebhook(String webhookURL) throws IOException {
         JsonObject content = new JsonObject();
         
         content.addProperty("content", "Setting up MCStatus Live Update, please wait several seconds...");
         
-        String r = sendWebhook(webhookURL, content.toString(), "POST");
+        String r = send(new HttpPost(webhookURL + "?wait=true"), content.toString());
         
         JsonObject rawResult = JsonParser.parseString(r).getAsJsonObject();
         
         return rawResult.get("id").getAsString();
     }
     
-    private static String sendWebhook(String webhookUrl, String payload, String method) throws IOException {
-        try (CloseableHttpClient client = HttpClients.createDefault()) {
-            HttpRequestBase request;
+    private String send(HttpEntityEnclosingRequestBase request, String payload) throws IOException {
+        request.setEntity(new StringEntity(payload, ContentType.APPLICATION_JSON));
+        
+        try (CloseableHttpResponse response = client.execute(request)) {
+            int status = response.getStatusLine().getStatusCode();
             
-            // ?wait=true needs to be added otherwise no content is returned from Discord
-            switch (method) {
-                case "POST":
-                    request = new HttpPost(webhookUrl + "?wait=true");
-                    ((HttpPost) request).setEntity(new StringEntity(payload));
-                    break;
-                case "PATCH":
-                    request = new HttpPatch(webhookUrl + "?wait=true");
-                    ((HttpPatch) request).setEntity(new StringEntity(payload));
-                    break;
-                default:
-                    throw new IllegalArgumentException("Unsupported HTTP method: " + method);
-            }
-
-            request.setHeader("Content-Type", "application/json");
+            HttpEntity entity = response.getEntity();
+            String body = entity == null ? "" : EntityUtils.toString(entity);
             
-            try (CloseableHttpResponse response = client.execute(request)) {
-                if(response.getStatusLine().getStatusCode() == 404) {
-                    throw new FileNotFoundException();
-                }
-                return EntityUtils.toString(response.getEntity());
+            if(status == 404) {
+                throw new FileNotFoundException("Discord returned 404: the webhook or its message no longer exists");
             }
+            
+            if(status >= 400) {
+                throw new IOException("Discord returned HTTP " + status + ": " + truncate(body));
+            }
+            
+            return body;
         }
+    }
+    
+    private static String truncate(String s) {
+        return s.length() <= 300 ? s : s.substring(0, 300) + "...";
+    }
+    
+    @Override
+    public void close() throws IOException {
+        client.close();
     }
     
 }
