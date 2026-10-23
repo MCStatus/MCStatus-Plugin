@@ -84,24 +84,33 @@ public final class Liveupdate extends JavaPlugin implements Listener {
         cancelUpdateTask();
         
         if(webhookExecutor != null) {
+            // Queue the offline status behind any in-flight update so it is always the last one Discord sees
+            if(messageID != null && !UNSET_WEBHOOK_URL.equals(webhookUrl)) {
+                String strippedMotd = ChatColor.stripColor(Bukkit.getServer().getMotd());
+                int maxPlayers = Bukkit.getServer().getMaxPlayers();
+                String version = resolveVersion();
+
+                String id = messageID;
+                String url = webhookUrl;
+                String icon = iconURL;
+                String footer = footerText;
+
+                webhookExecutor.execute(() -> {
+                    try {
+                        webhook.sendServerStatusToDiscord(id, icon, strippedMotd, footer, false, 0, maxPlayers, version, url);
+                    } catch (IOException e) {
+                        getLogger().warning("Could not send the offline status to Discord: " + e.getMessage());
+                    }
+                });
+            }
+
             webhookExecutor.shutdown();
             try {
-                if(!webhookExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    getLogger().warning("Timed out waiting for the last Discord update to finish");
+                if(!webhookExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    getLogger().warning("Timed out waiting for the offline status to reach Discord");
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-            }
-        }
-        
-        if(webhook != null && messageID != null && !UNSET_WEBHOOK_URL.equals(webhookUrl)) {
-            String strippedMotd = ChatColor.stripColor(Bukkit.getServer().getMotd());
-            int maxPlayers = Bukkit.getServer().getMaxPlayers();
-            
-            try {
-                webhook.sendServerStatusToDiscord(messageID, iconURL, strippedMotd, footerText, false, 0, maxPlayers, resolveVersion(), webhookUrl);
-            } catch (IOException e) {
-                getLogger().warning("Could not send the offline status to Discord: " + e.getMessage());
             }
         }
         
