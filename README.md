@@ -1,3 +1,6 @@
+> [!CAUTION]
+> This is now unmaintained, see the new plugin: https://github.com/MCStatus/MCStatus-Mods-Plugins/releases/tag/v1.0.1
+
 # MCStatus Live Update
 
 This is a plugin which allows you to update your server status
